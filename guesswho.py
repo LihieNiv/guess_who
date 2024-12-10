@@ -24,7 +24,7 @@ class AnalyzeNetwork:
         if "ICMP" not in packet:
             return UNKNOWN
         ttl = int(packet.ip.ttl)
-        if ttl <= 64:
+        if ttl <= 64 and "icmp.data_time" in packet.icmp._all_fields:
             return UNIX
         if ttl <= 128:
             return WINDOWS
@@ -158,3 +158,10 @@ class AnalyzeNetwork:
 
     def __str__(self):
         return f"Network Analyzer For File: '{self.pcap_path}'"
+
+
+if __name__ == "__main__":
+    # Probably something with how pyshark opens the file but you need to call this from the same directory as where the file is.
+    path = "pcap-02.pcapng"
+    anlz = AnalyzeNetwork(path)
+    print(anlz.get_info())
