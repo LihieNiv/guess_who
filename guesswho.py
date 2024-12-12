@@ -9,6 +9,16 @@ SOLARIS = "SOLARIS"
 class AnalyzeNetwork:
     FORBIDDEN_MAC = {"ff:ff:ff:ff:ff:ff"}
     FORBIDDEN_IP = {"127.0.0.1", "0.0.0.0", "255.255.255.255"}
+    BROWSERS = {
+        "Firefox": [{"Firefox"}, {"Seamonkey"}],
+        "Seamonkey": [{"Seamonkey"}, {}],
+        "Chrome": [{"Chrome"}, {"Chromium", "Edg"}],
+        "Chromium": [{"Chromium"}, {}],
+        "Safari": [{"Safari"}, {"Chrome", "Chromium"}],
+        "Edge": [{"Edg"}, {}],
+        "Opera 15+": [{"OPR"}, {}],
+        "Opera 12-": [{"Opera"}, {}],
+    }
 
     def __init__(self, pcap_path):
         self.pcap_path = pcap_path
@@ -21,14 +31,28 @@ class AnalyzeNetwork:
         self._load_data()
 
     def infer_os(self, packet):
-        if "ICMP" not in packet:
+        if "IP" not in packet:
             return UNKNOWN
         ttl = int(packet.ip.ttl)
-        if ttl <= 64 and "icmp.data_time" in packet.icmp._all_fields:
-            return UNIX
+        if ttl <= 64:
+            if "ICMP" not in packet:
+                return UNIX
+            if "icmp.data_time" in packet.icmp._all_fields:
+                return UNIX
         if ttl <= 128:
             return WINDOWS
         return SOLARIS
+
+    def infer_protocol(self, packet, protocol):
+        layers = [repr(item)[1:-7] for item in packet.layers]
+        ind = layers.index(protocol)
+        if ind == len(layers) - 1:
+            return UNKNOWN
+        if layers[ind + 1] == "DATA":
+            if ind + 1 == len(layers) - 1:
+                return "DATA"
+            return layers[ind + 2]
+        return layers[ind + 1]
 
     def parse_time_zone(self, time_zone):
         i = len(time_zone) - 1
@@ -69,7 +93,12 @@ class AnalyzeNetwork:
     def merge_dicts(self, old, new):
         old_keys = old.keys()
         for key in new.keys():
-            if key not in old_keys or new[key] != UNKNOWN:
+            if isinstance(new[key], dict):
+                if key not in old_keys:
+                    old[key] = new[key]
+                else:
+                    self.merge_dicts(old[key], new[key])
+            elif key not in old_keys or new[key] != UNKNOWN:
                 old[key] = new[key]
 
     def _add_to_dict(self, info):
@@ -90,6 +119,50 @@ class AnalyzeNetwork:
             self.merge_dicts(self.mac_dict[mac][ip], info)
             self.merge_dicts(self.ip_dict[ip][mac], info)
 
+    def find_protocol(self, packet):
+        if "TCP" in packet:
+            sport = packet.tcp.port
+            dport = packet.tcp.dstport
+            protocol = self.infer_protocol(packet, "TCP")
+            sprotocol = protocol
+            if protocol == "HTTP":
+                browser = self.get_browser_name(packet)
+                sprotocol = (protocol, browser)
+            return {sport: sprotocol}, {dport: protocol}
+        elif "UDP" in packet:
+            sport = packet.udp.port
+            dport = packet.udp.dstport
+            protocol = self.infer_protocol(packet, "UDP")
+            return {sport: protocol}, {dport: protocol}
+        return {}, {}
+
+    def get_http_url(self, packet):
+        if "HTTP" not in packet:
+            return UNKNOWN
+        if (
+            "http.request" not in packet.http._all_fields
+            or packet.http.request != "True"
+        ):
+            return UNKNOWN
+        return packet.http._all_fields["http.request.uri"]
+
+    def get_browser_name(self, packet):
+        if "HTTP" not in packet or "http.user_agent" not in packet.http._all_fields:
+            return UNKNOWN
+        user_agent = packet.http.user_agent
+        for browser in self.BROWSERS:
+            flag = True
+            l = self.BROWSERS[browser]
+            for good in l[0]:
+                if good not in user_agent:
+                    flag = False
+            for bad in l[1]:
+                if bad in user_agent:
+                    flag = False
+            if flag:
+                return browser
+        return UNKNOWN
+
     def _load_data(self):
         for packet in self.pcap_file:
             src_mac = packet.eth.src
@@ -102,12 +175,14 @@ class AnalyzeNetwork:
             dst_op = UNKNOWN
             src_TZ = self.get_time_zone(packet)
             dst_TZ = UNKNOWN
+            src_prot_dict, dst_prot_dict = self.find_protocol(packet)
             src_info = {
                 "MAC": src_mac,
                 "IP": src_ip,
                 "VENDOR": src_ven,
                 "OPERATING SYSTEM": src_op,
                 "TIME ZONE": src_TZ,
+                "PORT-PROTO DICT": src_prot_dict,
             }
             dst_info = {
                 "MAC": dst_mac,
@@ -115,6 +190,7 @@ class AnalyzeNetwork:
                 "VENDOR": dst_ven,
                 "OPERATING SYSTEM": dst_op,
                 "TIME ZONE": dst_TZ,
+                "PORT-PROTO DICT": dst_prot_dict,
             }
             self._add_to_dict(src_info)
             self._add_to_dict(dst_info)
@@ -162,6 +238,6 @@ class AnalyzeNetwork:
 
 if __name__ == "__main__":
     # Probably something with how pyshark opens the file but you need to call this from the same directory as where the file is.
-    path = "pcap-02.pcapng"
+    path = "pcap-03.pcapng"
     anlz = AnalyzeNetwork(path)
     print(anlz.get_info())
